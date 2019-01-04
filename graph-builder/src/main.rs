@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+extern crate actix;
 extern crate actix_web;
 extern crate cincinnati;
 extern crate dkregistry;
@@ -35,11 +36,14 @@ extern crate tar;
 extern crate tokio;
 extern crate tokio_core;
 
+mod cache;
 mod config;
 mod graph;
 mod registry;
 mod release;
+mod scanner;
 
+use actix::{Actor, Arbiter};
 use actix_web::{http::Method, middleware::Logger, server, App};
 use failure::Error;
 use log::LevelFilter;
@@ -47,7 +51,9 @@ use std::thread;
 use structopt::StructOpt;
 
 fn main() -> Result<(), Error> {
+    let sys = actix::System::new("graph-builder");
     let opts = config::Options::from_args();
+    let addr = (opts.address, opts.port);
 
     env_logger::Builder::from_default_env()
         .filter(
@@ -62,19 +68,38 @@ fn main() -> Result<(), Error> {
         .init();
 
     let state = graph::State::new();
-    let addr = (opts.address, opts.port);
+    /*
+        {
+            let state = state.clone();
+            thread::spawn(move || graph::run(&opts, &state));
+        }
+    */
+    // Registry scanning, in a dedicated thread.
+    let _scaner = {
+        let (user, passwd) =
+            registry::read_credentials(opts.credentials_path.as_ref(), &opts.registry)?;
+        let actor = scanner::RegistryScanner::new(
+            opts.period.clone(),
+            opts.registry.clone(),
+            opts.repository.clone(),
+            user,
+            passwd,
+        );
+        Arbiter::start(|_| actor)
+    };
 
-    {
-        let state = state.clone();
-        thread::spawn(move || graph::run(&opts, &state));
-    }
+    // Release metadata caching, in a dedicated thread.
+    let _cache = Arbiter::start(|_| cache::CacheManager::default());
 
+    // Graph rendering service.
     server::new(move || {
         App::with_state(state.clone())
             .middleware(Logger::default())
             .route("/v1/graph", Method::GET, graph::index)
     })
     .bind(addr)?
-    .run();
+    .start();
+
+    sys.run();
     Ok(())
 }

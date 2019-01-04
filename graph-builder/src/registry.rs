@@ -43,12 +43,12 @@ impl Into<cincinnati::Release> for Release {
     }
 }
 
-fn trim_protocol(src: &str) -> &str {
+pub(crate) fn trim_protocol(src: &str) -> &str {
     src.trim_left_matches("https://")
         .trim_left_matches("http://")
 }
 
-pub fn read_credentials(
+pub(crate) fn read_credentials(
     credentials_path: Option<&PathBuf>,
     registry: &str,
 ) -> Result<(Option<String>, Option<String>), Error> {
@@ -58,6 +58,35 @@ pub fn read_credentials(
                 .map_err(|e| format_err!("{}", e))?,
         )
     })
+}
+
+pub(crate) fn authenticate_client2(
+    client: dkregistry::v2::Client,
+    login_scope: String,
+) -> impl Future<Item = dkregistry::v2::Client, Error = dkregistry::errors::Error> {
+    client
+        .is_v2_supported()
+        .and_then(move |v2_supported| {
+            if !v2_supported {
+                Err("API v2 not supported".into())
+            } else {
+                Ok(client)
+            }
+        })
+        .and_then(move |mut dclient| {
+            dclient.login(&[&login_scope]).and_then(move |token| {
+                dclient
+                    .is_auth(Some(token.token()))
+                    .and_then(move |is_auth| {
+                        if !is_auth {
+                            Err("login failed".into())
+                        } else {
+                            dclient.set_token(Some(token.token()));
+                            Ok(dclient)
+                        }
+                    })
+            })
+        })
 }
 
 pub fn authenticate_client(
@@ -340,4 +369,19 @@ fn assemble_metadata(blob: &[u8], metadata_filename: &str) -> Result<Metadata, E
         None => bail!(format!("'{}' not found", metadata_filename)),
     }
     .map_err(Into::into)
+}
+
+pub(crate) fn fetch_tags(
+    client: dkregistry::v2::Client,
+    repo: &str,
+) -> impl Stream<Item = (dkregistry::v2::Client, String), Error = Error> {
+    // Paginate results, 20 tags per page.
+    let tags_per_page = Some(20);
+
+    trace!("fetching tags for repo {}", repo);
+    client
+        .get_tags(repo, tags_per_page)
+        .map(move |tags| (client.clone(), tags))
+        .map_err(|e| format_err!("{}", e))
+        .map_err(|e| format_err!("{}", e))
 }
