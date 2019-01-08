@@ -13,13 +13,12 @@
 // limitations under the License.
 
 use cincinnati;
-use failure::{Error, Fallible, ResultExt};
+use failure::Error;
 use flate2::read::GzDecoder;
 use futures::future;
 use futures::prelude::*;
 use release::Metadata;
 use serde_json;
-use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
 use std::iter::Iterator;
@@ -44,7 +43,7 @@ impl Into<cincinnati::Release> for Release {
     }
 }
 
-fn trim_protocol(src: &str) -> &str {
+pub(crate) fn trim_protocol(src: &str) -> &str {
     src.trim_left_matches("https://")
         .trim_left_matches("http://")
 }
@@ -61,7 +60,7 @@ pub fn read_credentials(
     })
 }
 
-fn authenticate_client(
+pub(crate) fn authenticate_client(
     client: dkregistry::v2::Client,
     login_scope: String,
 ) -> impl Future<Item = dkregistry::v2::Client, Error = Error> {
@@ -94,25 +93,25 @@ fn authenticate_client(
 /// Fetches a vector of all release metadata from the given repository, hosted on the given
 /// registry.
 pub fn fetch_releases(
-    registry: &str,
-    repo: &str,
-    username: Option<&str>,
-    password: Option<&str>,
-    cache: &mut HashMap<u64, Option<Release>>,
-) -> Result<Vec<Release>, Error> {
+    registry: String,
+    repo: String,
+    username: Option<String>,
+    password: Option<String>,
+) -> impl Future<Item = Vec<Release>, Error = Error> {
+    trace!("scanning repository {} on {} for releases", repo, registry);
     let registry_host = trim_protocol(&registry);
     let login_scope = format!("repository:{}:pull", &repo);
 
-    let client = dkregistry::v2::Client::configure(&Core::new()?.handle())
+    let client = dkregistry::v2::Client::configure(&Core::new().unwrap().handle())
         .registry(registry_host)
         .insecure_registry(false)
-        .username(username.map(|s| s.to_string()))
-        .password(password.map(|s| s.to_string()))
+        .username(username)
+        .password(password)
         .build()
         .map_err(|e| format_err!("{}", e));
 
     let tagged_layers = {
-        let mut thread_runtime = tokio::runtime::current_thread::Runtime::new()?;
+        let mut thread_runtime = tokio::runtime::current_thread::Runtime::new().unwrap();
         let fetch_tags = future::result(client)
             .map(move |client| (client, login_scope))
             .and_then(|(client, scope)| authenticate_client(client, scope))
@@ -121,42 +120,37 @@ pub fn fetch_releases(
                 future::ok(tags_stream)
             })
             .flatten_stream()
-            .and_then(|(authenticated_client, tag)| {
+            .and_then(|(authenticated_client, repo, tag)| {
                 get_manifest_and_layers(tag, repo, authenticated_client)
             })
             .collect();
-        thread_runtime.block_on(fetch_tags)?
+        thread_runtime.block_on(fetch_tags).unwrap()
     };
 
     let mut releases = Vec::with_capacity(tagged_layers.len());
-    for (authenticated_client, tag, layer_digests) in tagged_layers {
+    /*
+    for (authenticated_client, repo, tag, layer_digests) in tagged_layers {
         let release = cache_release(
             layer_digests,
             authenticated_client.to_owned(),
             registry_host.to_owned(),
-            repo.to_owned(),
-            tag.to_owned(),
-            cache,
+            repo,
+            tag,
         )?;
         if let Some(metadata) = release {
             releases.push(metadata);
         };
     }
+    */
     releases.shrink_to_fit();
 
-    Ok(releases)
+    future::ok(releases)
 }
 
+/*
+
 /// Look up release metadata for a specific tag, and cache it.
-///
-/// Each tagged release is looked up at most once and both
-/// positive (Some metadata) and negative (None) results cached
-/// indefinitely.
-///
-/// Update Images with release metadata should be immutable, but
-/// tags on registry can be mutated at any time. Thus, the cache
-/// is keyed on the hash of tag layers.
-fn cache_release(
+pub(crate) fn cache_release(
     layer_digests: Vec<String>,
     authenticated_client: dkregistry::v2::Client,
     registry_host: String,
@@ -164,19 +158,11 @@ fn cache_release(
     tag: String,
     cache: &mut HashMap<u64, Option<Release>>,
 ) -> Fallible<Option<Release>> {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
 
     // TODO(lucab): get rid of this synchronous lookup, by
     // introducing a dedicated actor which owns the cache
     // and handles queries and insertions.
     let mut thread_runtime = tokio::runtime::current_thread::Runtime::new()?;
-
-    let hashed_tag_layers = {
-        let mut hasher = DefaultHasher::new();
-        layer_digests.hash(&mut hasher);
-        hasher.finish()
-    };
 
     if let Some(release) = cache.get(&hashed_tag_layers) {
         trace!("Using cached release metadata for tag {}", &tag);
@@ -188,9 +174,9 @@ fn cache_release(
         authenticated_client,
         registry_host,
         repo,
-        tag,
+        tag.clone(),
     );
-    let (tag, release) = thread_runtime
+    let release = thread_runtime
         .block_on(tagged_release)
         .context("failed to find first release")?;
 
@@ -198,6 +184,7 @@ fn cache_release(
     cache.insert(hashed_tag_layers, release.clone());
     Ok(release)
 }
+*/
 
 /// Fetch all tags for a repository, as a stream.
 ///
@@ -205,43 +192,45 @@ fn cache_release(
 /// According to [specs](https://docs.docker.com/registry/spec/api/#listing-image-tags),
 /// remote API should return tags in lexicographic order.
 /// However on Quay 2.9 this is not true.
-fn get_tags(
-    repo: &str,
+pub(crate) fn get_tags(
+    repo: String,
     authenticated_client: dkregistry::v2::Client,
-) -> impl Stream<Item = (dkregistry::v2::Client, String), Error = Error> {
+) -> impl Stream<Item = (dkregistry::v2::Client, String, String), Error = Error> {
     // Paginate results, 20 tags per page.
     let tags_per_page = Some(20);
 
     trace!("fetching tags for repo {}", repo);
     authenticated_client
-        .get_tags(repo, tags_per_page)
-        .map(move |tags| (authenticated_client.clone(), tags))
+        .get_tags(&repo, tags_per_page)
+        .map(move |tags| (authenticated_client.clone(), repo.clone(), tags))
         .map_err(|e| format_err!("{}", e))
 }
 
 /// Fetch manifest for a tag, and return its layers digests.
-fn get_manifest_and_layers(
+pub(crate) fn get_manifest_and_layers(
     tag: String,
-    repo: &str,
+    repo: String,
     authenticated_client: dkregistry::v2::Client,
-) -> impl Future<Item = (dkregistry::v2::Client, String, Vec<String>), Error = failure::Error> {
+) -> impl Future<Item = (dkregistry::v2::Client, String, String, Vec<String>), Error = failure::Error>
+{
     trace!("processing: {}:{}", repo, &tag);
     authenticated_client
-        .has_manifest(repo, &tag, None)
-        .join(authenticated_client.get_manifest(repo, &tag))
+        .has_manifest(&repo, &tag, None)
+        .join(authenticated_client.get_manifest(&repo, &tag))
         .map_err(|e| format_err!("{}", e))
         .and_then(move |(manifest_kind, manifest)| get_layer_digests(&manifest_kind, &manifest))
-        .map(move |digests| (authenticated_client, tag, digests))
+        .map(move |digests| (authenticated_client, repo, tag, digests))
 }
 
-fn find_first_release(
+pub(crate) fn find_first_release(
     layer_digests: Vec<String>,
     authenticated_client: dkregistry::v2::Client,
     registry_host: String,
     repo: String,
     repo_tag: String,
-) -> impl Future<Item = (String, Option<Release>), Error = Error> {
+) -> impl Future<Item = (Vec<String>, Option<Release>), Error = Error> {
     let tag = repo_tag.clone();
+    let out_digests = layer_digests.clone();
 
     let releases = layer_digests.into_iter().map(move |layer_digest| {
         trace!("Downloading layer {}...", &layer_digest);
@@ -285,9 +274,9 @@ fn find_first_release(
         .map(move |mut releases| {
             if releases.is_empty() {
                 warn!("could not find any release in tag {}", tag);
-                (tag, None)
+                (out_digests, None)
             } else {
-                (tag, Some(releases.remove(0)))
+                (out_digests, Some(releases.remove(0)))
             }
         })
 }

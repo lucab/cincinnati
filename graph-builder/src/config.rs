@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
 
-#[derive(Debug, StructOpt)]
+#[derive(Clone, Debug, StructOpt)]
 pub struct Options {
     /// Verbosity level
     #[structopt(short = "v", parse(from_occurrences))]

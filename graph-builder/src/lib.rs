@@ -1,3 +1,4 @@
+extern crate actix;
 extern crate cincinnati;
 extern crate dkregistry;
 extern crate env_logger;
@@ -21,7 +22,9 @@ extern crate log;
 #[macro_use]
 extern crate structopt;
 
+pub mod cache;
 pub mod config;
 pub mod graph;
 pub mod registry;
+pub mod registry_scanner;
 pub mod release;

@@ -1,12 +1,13 @@
 extern crate cincinnati;
 extern crate graph_builder;
 extern crate semver;
+extern crate tokio;
 
 use self::graph_builder::registry::{fetch_releases, read_credentials, Release};
 use self::graph_builder::release::Metadata;
 use self::graph_builder::release::MetadataKind::V0;
 use self::semver::Version;
-use std::collections::HashMap;
+use self::tokio::runtime::current_thread;
 
 fn init_logger() {
     let _ = env_logger::try_init_from_env(env_logger::Env::default());
@@ -68,6 +69,7 @@ fn fetch_release_private_with_credentials_must_succeed() {
     use std::path::PathBuf;
 
     init_logger();
+    let mut rt = current_thread::Runtime::new().unwrap();
 
     let registry = "quay.io";
     let repo = "redhat/openshift-cincinnati-test-private-manual";
@@ -79,14 +81,8 @@ fn fetch_release_private_with_credentials_must_succeed() {
         }
     };
     let (username, password) = read_credentials(credentials_path.as_ref(), registry).unwrap();
-    let releases = fetch_releases(
-        &registry,
-        &repo,
-        username.as_ref().map(String::as_ref),
-        password.as_ref().map(String::as_ref),
-        &mut cache,
-    )
-    .expect("fetch_releases failed: ");
+    let fetch = fetch_releases(registry.to_string(), repo.to_string(), username, password);
+    let releases = rt.block_on(fetch).expect("fetch_releases failed: ");
     assert_eq!(2, releases.len());
     assert_eq!(
         expected_releases(&format!("{}/{}", registry, repo), 2, 0),
@@ -97,11 +93,12 @@ fn fetch_release_private_with_credentials_must_succeed() {
 #[test]
 fn fetch_release_public_without_credentials_must_fail() {
     init_logger();
+    let mut rt = current_thread::Runtime::new().unwrap();
 
     let registry = "quay.io";
     let repo = "redhat/openshift-cincinnati-test-private-manual";
-    let mut cache = HashMap::new();
-    let releases = fetch_releases(&registry, &repo, None, None, &mut cache);
+    let fetch = fetch_releases(registry.to_string(), repo.to_string(), None, None);
+    let releases = rt.block_on(fetch);
     assert_eq!(true, releases.is_err());
     assert_eq!(
         true,
@@ -116,24 +113,24 @@ fn fetch_release_public_without_credentials_must_fail() {
 #[test]
 fn fetch_release_public_with_no_release_metadata_must_not_error() {
     init_logger();
+    let mut rt = current_thread::Runtime::new().unwrap();
 
     let registry = "quay.io";
     let repo = "redhat/openshift-cincinnati-test-nojson-public-manual";
-    let mut cache = HashMap::new();
-    let releases = fetch_releases(&registry, &repo, None, None, &mut cache)
-        .expect("should not error on emtpy repo");
+    let fetch = fetch_releases(registry.to_string(), repo.to_string(), None, None);
+    let releases = rt.block_on(fetch).expect("should not error on empty repo");
     assert!(releases.is_empty())
 }
 
 #[test]
 fn fetch_release_public_with_first_empty_tag_must_succeed() {
     init_logger();
+    let mut rt = current_thread::Runtime::new().unwrap();
 
     let registry = "quay.io";
     let repo = "redhat/openshift-cincinnati-test-emptyfirsttag-public-manual";
-    let mut cache = HashMap::new();
-    let releases =
-        fetch_releases(&registry, &repo, None, None, &mut cache).expect("fetch_releases failed: ");
+    let fetch = fetch_releases(registry.to_string(), repo.to_string(), None, None);
+    let releases = rt.block_on(fetch).expect("fetch_releases failed: ");
     assert_eq!(2, releases.len());
     assert_eq!(
         expected_releases(&format!("{}/{}", registry, repo), 2, 1),

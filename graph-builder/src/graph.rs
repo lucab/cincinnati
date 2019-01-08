@@ -16,12 +16,9 @@ use actix_web::http::header::{self, HeaderValue};
 use actix_web::{HttpMessage, HttpRequest, HttpResponse};
 use cincinnati::{AbstractRelease, Graph, Release, CONTENT_TYPE};
 use config;
-use failure::{Error, ResultExt};
+use failure::Error;
 use registry;
-use serde_json;
-use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
-use std::thread;
 
 pub fn index(req: HttpRequest<State>) -> HttpResponse {
     match req.headers().get(header::ACCEPT) {
@@ -40,7 +37,7 @@ pub fn index(req: HttpRequest<State>) -> HttpResponse {
 
 #[derive(Clone)]
 pub struct State {
-    json: Arc<RwLock<String>>,
+    pub(crate) json: Arc<RwLock<String>>,
 }
 
 impl State {
@@ -51,44 +48,11 @@ impl State {
     }
 }
 
-pub fn run(opts: &config::Options, state: &State) -> ! {
-    // Grow-only cache, mapping tag (hashed layers) to optional release metadata.
-    let mut cache = HashMap::new();
-
-    // Read the credentials outside the loop to avoid re-reading the file
-    let (username, password) =
-        registry::read_credentials(opts.credentials_path.as_ref(), &opts.registry)
-            .expect("could not read credentials");
-
-    loop {
-        debug!("Updating graph...");
-        match create_graph(
-            &opts,
-            username.as_ref().map(String::as_ref),
-            password.as_ref().map(String::as_ref),
-            &mut cache,
-        ) {
-            Ok(graph) => match serde_json::to_string(&graph) {
-                Ok(json) => *state.json.write().expect("json lock has been poisoned") = json,
-                Err(err) => error!("Failed to serialize graph: {}", err),
-            },
-            Err(err) => err.iter_chain().for_each(|cause| error!("{}", cause)),
-        }
-        thread::sleep(opts.period);
-    }
-}
-
-fn create_graph(
+pub(crate) fn create_graph(
     opts: &config::Options,
-    username: Option<&str>,
-    password: Option<&str>,
-    cache: &mut HashMap<u64, Option<registry::Release>>,
+    releases: Vec<registry::Release>,
 ) -> Result<Graph, Error> {
     let mut graph = Graph::default();
-
-    let releases =
-        registry::fetch_releases(&opts.registry, &opts.repository, username, password, cache)
-            .context("failed to fetch all release metadata")?;
 
     if releases.is_empty() {
         warn!(
